@@ -1358,6 +1358,13 @@ header .status-bar .dot {
         <div class="folder-picker" id="folderPicker"></div>
       </div>
       <div class="form-field">
+        <label>CLI 工具</label>
+        <div class="input-row">
+          <span class="input-prefix">&gt;_</span>
+          <select id="spawnCli"></select>
+        </div>
+      </div>
+      <div class="form-field">
         <label>PROMPT</label>
         <div class="input-row" style="align-items:start">
           <span class="input-prefix" style="padding-top:10px">&gt;_</span>
@@ -1520,6 +1527,8 @@ function renderCard(agent) {
   const lastActHtml = ansiToHtml(agent.lastActivity || '');
 
   let metaLines = '';
+  const cliLabel = { claude: 'Claude Code', codebuddy: 'CodeBuddy' }[agent.cli] || agent.cli || 'Claude Code';
+  metaLines += `<div class="meta">CLI: <span>${escapeHtml(cliLabel)}</span></div>`;
   metaLines += `<div class="meta">PROJECT: <span>${escapeHtml(projectName)}</span></div>`;
   metaLines += `<div class="meta">UPTIME: <span>${uptime}</span></div>`;
 
@@ -1666,6 +1675,7 @@ function renderCard(agent) {
 async function spawnAgent() {
   const projectPath = document.getElementById('spawnProject').value.trim();
   const prompt = document.getElementById('spawnPrompt').value.trim();
+  const cli = document.getElementById('spawnCli').value;
 
   if (!projectPath || !prompt) {
     alert('Project path and prompt are required');
@@ -1676,7 +1686,7 @@ async function spawnAgent() {
     const res = await fetch('/api/agents', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ projectPath, prompt }),
+      body: JSON.stringify({ projectPath, prompt, cli }),
     });
     const data = await res.json();
     if (data.error) {
@@ -2021,6 +2031,7 @@ async function sendFromOutput() {
 function openSpawnModal() {
   document.getElementById('spawnProject').value = '';
   document.getElementById('spawnPrompt').value = '';
+  document.getElementById('spawnCli').value = 'claude';
   document.getElementById('spawnModal').classList.add('active');
   loadRecentProjects().then(() => {
     document.getElementById('spawnProject').focus();
@@ -2095,6 +2106,26 @@ function escapeAttr(str) {
 // ─── RECENT PROJECTS COMBO BOX ─────────────────────────────────────────
 let recentProjects = [];
 let comboActiveIdx = -1;
+let cliProfiles = []; // 可用的 CLI 工具列表
+let defaultCli = 'claude';
+
+// 加载可用的 CLI 工具列表
+async function loadCliProfiles() {
+  try {
+    const res = await fetch('/api/cli-profiles');
+    const data = await res.json();
+    cliProfiles = data.profiles || [];
+    defaultCli = data.default || 'claude';
+    const select = document.getElementById('spawnCli');
+    if (select) {
+      select.innerHTML = cliProfiles.map(p =>
+        `<option value="${p.id}"${p.id === defaultCli ? ' selected' : ''}>${escapeHtml(p.name)}</option>`
+      ).join('');
+    }
+  } catch (e) {
+    console.error('Failed to load CLI profiles:', e);
+  }
+}
 
 async function loadRecentProjects() {
   try {
@@ -2438,10 +2469,10 @@ function initMobileLayout() {
 
 window.addEventListener('resize', initMobileLayout);
 
-// ─── INIT ──────────────────────────────────────────────────────────────
+// ─── INIT ──────────────────────────────────────────────────────────────────────
 fetchAgents();
 connectSSE();
 initMobileLayout();
-</script>
+loadCliProfiles();</script>
 </body>
 </html>

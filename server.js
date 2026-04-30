@@ -15,6 +15,23 @@ const REGISTRY_FILE = path.join(__dirname, '.agent-registry.json');
 const POLL_INTERVAL = 3000;
 const SPAWN_PREFIX = 'agent-';
 
+// ─── CLI Profiles ────────────────────────────────────────────────────────────
+// 支持的 CLI 配置，可在此处扩展更多 CLI 工具
+const CLI_PROFILES = {
+  claude: {
+    name: 'Claude Code',
+    command: 'claude --chrome --dangerously-skip-permissions',
+    processPattern: /(?:^|\/)claude\s|(?:^|\/)claude$/,
+  },
+  codebuddy: {
+    name: 'CodeBuddy',
+    command: 'codebuddy',
+    processPattern: /(?:^|\/)codebuddy\s|(?:^|\/)codebuddy$/,
+  },
+};
+
+const DEFAULT_CLI = 'claude';
+
 // ─── Agent Registry ──────────────────────────────────────────────────────────
 
 let registry = {};
@@ -162,7 +179,13 @@ function hasClaudeDescendant(pid, tree) {
     visited.add(current);
 
     const cmd = tree.commands[current] || '';
-    // Match "claude" as a command (not "agent-viewer" or other incidental matches)
+    // 匹配所有已注册的 CLI 进程（claude、codebuddy 等）
+    for (const profile of Object.values(CLI_PROFILES)) {
+      if (profile.processPattern.test(cmd)) {
+        return true;
+      }
+    }
+    // 向后兼容：直接匹配 claude
     if (/(?:^|\/)claude\s/.test(cmd) || /(?:^|\/)claude$/.test(cmd)) {
       return true;
     }
@@ -307,13 +330,17 @@ async function waitForClaudeReady(sessionName, timeoutMs = 30000) {
   return false;
 }
 
-async function spawnAgent(projectPath, prompt) {
+async function spawnAgent(projectPath, prompt, cli) {
   // Expand ~ to home directory
   if (projectPath.startsWith('~')) {
     projectPath = path.join(os.homedir(), projectPath.slice(1));
   }
   // Resolve to absolute path
   projectPath = path.resolve(projectPath);
+
+  // 确定使用的 CLI 工具
+  cli = (cli && CLI_PROFILES[cli]) ? cli : DEFAULT_CLI;
+  const cliProfile = CLI_PROFILES[cli];
 
   // Use fallback label immediately for fast spawn, then upgrade via LLM async
   const quickLabel = fallbackLabel(prompt);
@@ -331,8 +358,8 @@ async function spawnAgent(projectPath, prompt) {
     throw new Error(`Project path does not exist: ${projectPath}`);
   }
 
-  const claudeCmd = 'claude --chrome --dangerously-skip-permissions';
-  const tmuxCmd = `tmux new-session -d -s ${finalName} -c "${projectPath}" '${claudeCmd}'`;
+  const cliCmd = cliProfile.command;
+  const tmuxCmd = `tmux new-session -d -s ${finalName} -c "${projectPath}" '${cliCmd}'`;
 
   console.log(`[SPAWN] quickLabel=${quickLabel} name=${finalName}`);
   console.log(`[SPAWN] projectPath=${projectPath}`);
@@ -353,6 +380,7 @@ async function spawnAgent(projectPath, prompt) {
     label: quickLabel,
     projectPath,
     prompt,
+    cli,
     createdAt: Date.now(),
     state: 'running',
     initialPromptSent: false,
@@ -635,6 +663,7 @@ function buildAgentInfo(sessionName, sessionsCache) {
     label: reg.label || sessionName,
     projectPath: reg.projectPath || '',
     prompt: reg.prompt || '',
+    cli: reg.cli || DEFAULT_CLI,
     state,
     promptType,
     createdAt: reg.createdAt || 0,
@@ -707,6 +736,15 @@ function getAllAgents() {
 
 // ─── API Routes ──────────────────────────────────────────────────────────────
 
+// 获取可用的 CLI 工具列表
+app.get('/api/cli-profiles', (req, res) => {
+  const profiles = Object.entries(CLI_PROFILES).map(([key, profile]) => ({
+    id: key,
+    name: profile.name,
+  }));
+  res.json({ profiles, default: DEFAULT_CLI });
+});
+
 app.get('/api/recent-projects', (req, res) => {
   try {
     const seen = new Map(); // path -> most recent createdAt
@@ -736,11 +774,11 @@ app.get('/api/agents', (req, res) => {
 
 app.post('/api/agents', async (req, res) => {
   try {
-    const { projectPath, prompt } = req.body;
+    const { projectPath, prompt, cli } = req.body;
     if (!projectPath || !prompt) {
       return res.status(400).json({ error: 'projectPath and prompt are required' });
     }
-    const name = await spawnAgent(projectPath, prompt);
+    const name = await spawnAgent(projectPath, prompt, cli);
     res.json({ name, status: 'spawned' });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -760,15 +798,17 @@ app.post('/api/agents/:name/send', (req, res) => {
     // If agent is completed/dead, re-spawn it in the same project
     if (reg && reg.state === 'completed') {
       const projectPath = reg.projectPath || '.';
-      const claudeCmd = 'claude --chrome --dangerously-skip-permissions';
+      const agentCli = (reg.cli && CLI_PROFILES[reg.cli]) ? reg.cli : DEFAULT_CLI;
+      const cliCmd = CLI_PROFILES[agentCli].command;
 
       execSync(
-        `tmux new-session -d -s ${name} -c "${projectPath}" '${claudeCmd}'`,
+        `tmux new-session -d -s ${name} -c "${projectPath}" '${cliCmd}'`,
         { encoding: 'utf-8', timeout: 10000 }
       );
 
       reg.state = 'running';
       reg.prompt = message;
+      reg.cli = agentCli;
       delete reg.idleSince;
       delete reg.completedAt;
       saveRegistry();
